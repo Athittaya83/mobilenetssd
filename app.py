@@ -1,14 +1,34 @@
 import os
-from flask import Flask, request, redirect, url_for, render_template, send_from_directory,flash 
+from flask import Flask, request, redirect, url_for, render_template, send_from_directory, flash, jsonify
 from werkzeug.utils import secure_filename
 import cv2
 import numpy as np
+import json
+import requests
+import tempfile, shutil, os
+from PIL import Image
+from io import BytesIO
+
+from linebot.models import (
+    TemplateSendMessage, AudioSendMessage,
+    MessageEvent, TextMessage, TextSendMessage,
+    SourceUser, PostbackEvent, StickerMessage, StickerSendMessage, 
+    LocationMessage, LocationSendMessage, ImageMessage, ImageSendMessage
+)
+from linebot.models.template import *
+from linebot import (
+    LineBotApi, WebhookHandler
+)
+
+app = Flask(__name__, static_url_path="/static")
 
 UPLOAD_FOLDER ='static/uploads/'
 DOWNLOAD_FOLDER = 'static/downloads/'
 ALLOWED_EXTENSIONS = {'jpg', 'png','.jpeg'}
-app = Flask(__name__, static_url_path="/static")
 
+lineaccesstoken = 'RiXCJUh3oZa+/o8ix24EVj25zdzdudFDEYofu5oH888rbQu7SpuXGZ4hLsrxgdGJ7GpQyIV0OIIGaUEUxfXeahXuMvXjgT+zdjbBQboxyKsCyDf/v3pTsJMdjs9fN+TOEdA2FcWrGw9tvOC45XBrQQdB04t89/1O/w1cDnyilFU='
+
+line_bot_api = LineBotApi(lineaccesstoken)
 
 # APP CONFIGURATIONS
 app.config['SECRET_KEY'] = 'opencv'  
@@ -19,7 +39,6 @@ app.config['MAX_CONTENT_LENGTH'] = 6 * 1024 * 1024
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -46,7 +65,6 @@ def index():
 def process_file(path, filename):
     detect_object(path, filename)
     
-
 def detect_object(path, filename):    
     CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat",
         "bottle", "bus", "car", "cat", "chair", "cow", "diningtable",
@@ -79,11 +97,106 @@ def detect_object(path, filename):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLORS[idx], 2)
 
     cv2.imwrite(f"{DOWNLOAD_FOLDER}{filename}",image)
-  
-# download 
-# @app.route('/uploads/<filename>')
-# def uploaded_file(filename):
-#     return send_from_directory(app.config['DOWNLOAD_FOLDER'], filename, as_attachment=True)
+
+@app.route('/callback', methods=['POST'])
+def callback():
+    json_line = request.get_json(force=False,cache=False)
+    json_line = json.dumps(json_line)
+    decoded = json.loads(json_line)
+    
+    # เชื่อมต่อกับ line 
+    no_event = len(decoded['events'])
+    for i in range(no_event):
+            event = decoded['events'][i]
+            event_handle(event,json_line)
+
+    # เชื่อมต่อกับ dialogflow
+    #intent = decoded["queryResult"]["intent"]["displayName"] 
+    #text = decoded['originalDetectIntentRequest']['payload']['data']['message']['text'] 
+    #reply_token = decoded['originalDetectIntentRequest']['payload']['data']['replyToken']
+    #id = decoded['originalDetectIntentRequest']['payload']['data']['source']['userId']
+    #disname = line_bot_api.get_profile(id).display_name
+    #reply(intent,text,reply_token,id,disname)
+
+    return '',200
+
+def reply(intent,text,reply_token,id,disname):
+    text_message = TextSendMessage(text="ทดสอบ")
+    line_bot_api.reply_message(reply_token,text_message)
+
+def event_handle(event,json_line):
+    print(event)
+    try:
+        userId = event['source']['userId']
+    except:
+        print('error cannot get userId')
+        return ''
+
+    try:
+        rtoken = event['replyToken']
+    except:
+        print('error cannot get rtoken')
+        return ''
+    try:
+        msgId = event["message"]["id"]
+        msgType = event["message"]["type"]
+    except:
+        print('error cannot get msgID, and msgType')
+        sk_id = np.random.randint(1,17)
+        replyObj = StickerSendMessage(package_id=str(1),sticker_id=str(sk_id))
+        line_bot_api.reply_message(rtoken, replyObj)
+        return ''
+
+    if msgType == "text":
+        msg = str(event["message"]["text"])
+        if msg == "สวัสดี":
+            replyObj = TextSendMessage(text="ว่าไง")
+            line_bot_api.reply_message(rtoken, replyObj)
+        elif msg == "ไปไหนดี":
+            replyObj = TextSendMessage(text="เขาล้าน")
+            line_bot_api.reply_message(rtoken, replyObj)
+        elif msg == "กินข้าวไหม":
+            replyObj = TextSendMessage(text="ไม่ล่ะ")
+            line_bot_api.reply_message(rtoken, replyObj)
+        elif msg == "covid" :
+            url = "https://covid19.ddc.moph.go.th/api/Cases/today-cases-all"
+            response = requests.get(url)
+            response = response.json()
+            replyObj = TextSendMessage(text=str(response))
+            line_bot_api.reply_message(rtoken, replyObj)
+        else :
+            headers = request.headers
+            json_headers = ({k:v for k, v in headers.items()})
+            json_headers.update({'Host':'bots.dialogflow.com'})
+            url = "https://dialogflow.cloud.google.com/v1/integrations/line/webhook/efdb8f5c-1118-491d-ad3a-1d73d4b4f444"
+            requests.post(url,data=json_line, headers=json_headers)
+    elif msgType == "image":
+        try:
+            message_content = line_bot_api.get_message_content(event['message']['id'])
+            i = Image.open(BytesIO(message_content.content))
+            filename = event['message']['id'] + '.jpg'
+            i.save(UPLOAD_FOLDER + filename)
+            process_file(os.path.join(UPLOAD_FOLDER, filename), filename)
+
+            url = request.url_root + DOWNLOAD_FOLDER + filename
+            
+            line_bot_api.reply_message(
+                rtoken, [
+                    TextSendMessage(text='Object detection result:'),
+                    ImageSendMessage(url,url)
+                ])    
+    
+        except:
+            message = TextSendMessage(text="เกิดข้อผิดพลาด กรุณาส่งใหม่อีกครั้ง")
+            line_bot_api.reply_message(event.reply_token, message)
+
+            return 0
+
+    else:
+        sk_id = np.random.randint(1,17)
+        replyObj = StickerSendMessage(package_id=str(1),sticker_id=str(sk_id))
+        line_bot_api.reply_message(rtoken, replyObj)
+    return ''
 
 if __name__ == '__main__':
     app.run()
